@@ -1,0 +1,6 @@
+{
+  "name": "FinSight",
+  "description": "An earthy, sophisticated personal wealth management and AI financial insights platform with smart budgeting, expense analysis, and a finance co-pilot.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
