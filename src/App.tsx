@@ -6,7 +6,8 @@ import {
   ChatMessage, 
   AssetHistory, 
   PotentialSaving, 
-  BudgetOptimization 
+  BudgetOptimization,
+  User
 } from './types';
 import { 
   INITIAL_INCOME_TRANSACTIONS, 
@@ -20,6 +21,7 @@ import {
 
 // TODO: Replace mock data imports with API fetching and hydrate app state from backend services.
 // TODO: Add useEffect in App to fetch initial data once on mount from endpoints like /api/incomes, /api/expenses, /api/budgets, /api/assets, /api/chat, /api/insights.
+// TODO: Replace auth skeleton with real auth endpoints and session / token handling.
 // Component Imports
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
@@ -30,9 +32,19 @@ import IncomeDashboard from './components/IncomeDashboard';
 import BudgetsOverview from './components/BudgetsOverview';
 import AssetsDashboard from './components/AssetsDashboard';
 import CreateBudgetModal from './components/CreateBudgetModal';
+import AuthScreen from './components/AuthScreen';
+
+// Handler Imports
+import { getAuthenticatedUser } from './handlers/auth';
+import { fetchAppData } from './handlers/data';
+import { addIncome, deleteIncome } from './handlers/income';
+import { addExpense, deleteExpense, adjustBudgetsForExpense, rollbackExpenseFromBudgets } from './handlers/expense';
+import { createBudget, deleteBudget } from './handlers/budget';
+import { createUserMessage, createBotMessage } from './handlers/messages';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>('dashboard');
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   
   // State variables in full React fidelity
   // TODO: Replace mock initialization with fetched income transactions from /api/incomes.
@@ -49,48 +61,43 @@ export default function App() {
   const [budgetOptimizations, setBudgetOptimizations] = useState<BudgetOptimization[]>(BUDGET_OPTIMIZATIONS);
   const [isCreateBudgetModalOpen, setIsCreateBudgetModalOpen] = useState(false);
 
+  const handleLogin = (user: User) => {
+    setCurrentUser(user);
+  };
+
   useEffect(() => {
     const loadInitialData = async () => {
-      try {
-        const [incomeRes, expenseRes, budgetRes, assetRes, chatRes, savingsRes, optimizationRes] = await Promise.all([
-          fetch('/api/incomes'),
-          fetch('/api/expenses'),
-          fetch('/api/budgets'),
-          fetch('/api/assets/history'),
-          fetch('/api/chat/messages'),
-          fetch('/api/insights/savings'),
-          fetch('/api/insights/optimizations')
-        ]);
-
-        if (!incomeRes.ok || !expenseRes.ok || !budgetRes.ok || !assetRes.ok || !chatRes.ok || !savingsRes.ok || !optimizationRes.ok) {
-          console.error('Failed to fetch one or more initial data endpoints');
-          return;
-        }
-
-        const [incomeData, expenseData, budgetData, assetData, chatData, savingsData, optimizationData] = await Promise.all([
-          incomeRes.json(),
-          expenseRes.json(),
-          budgetRes.json(),
-          assetRes.json(),
-          chatRes.json(),
-          savingsRes.json(),
-          optimizationRes.json()
-        ]);
-
-        setIncomes(incomeData);
-        setExpenses(expenseData);
-        setBudgets(budgetData);
-        setAssetHistory(assetData);
-        setChatMessages(chatData);
-        setPotentialSavings(savingsData);
-        setBudgetOptimizations(optimizationData);
-      } catch (error) {
-        console.error('Error loading initial app data', error);
+      const authenticatedUser = await getAuthenticatedUser();
+      if (authenticatedUser) {
+        setCurrentUser(authenticatedUser);
       }
     };
 
     loadInitialData();
   }, []);
+
+  useEffect(() => {
+    if (!currentUser) {
+      return;
+    }
+
+    const loadInitialData = async () => {
+      const appData = await fetchAppData();
+      if (!appData) {
+        return;
+      }
+
+      setIncomes(appData.incomes);
+      setExpenses(appData.expenses);
+      setBudgets(appData.budgets);
+      setAssetHistory(appData.assetHistory);
+      setChatMessages(appData.chatMessages);
+      setPotentialSavings(appData.potentialSavings);
+      setBudgetOptimizations(appData.budgetOptimizations);
+    };
+
+    loadInitialData();
+  }, [currentUser]);
 
   // Dynamic status triggers
   const totalIncomeCount = incomes.reduce((acc, cur) => acc + cur.amount, 0);
@@ -100,50 +107,23 @@ export default function App() {
 
   // Add handlers
   const handleAddIncome = (raw: Omit<Transaction, 'id' | 'status'>) => {
-    const fresh: Transaction = {
-      ...raw,
-      id: `inc-${Date.now()}`,
-      status: 'Completed'
-    };
+    const fresh = addIncome(raw);
     setIncomes((prev) => [fresh, ...prev]);
-    
+
     // Auto-inform chat model of positive updates!
     triggerBotWelcomeNotification(`You just recorded a new deposit of $${raw.amount} from '${raw.source}'. That raises this month's total cash flow to $${(totalIncomeCount + raw.amount).toLocaleString('en-US')}!`);
   };
 
   const handleDeleteIncome = (id: string) => {
-    setIncomes((prev) => prev.filter((i) => i.id !== id));
+    setIncomes((prev) => deleteIncome(id, prev));
   };
 
   const handleAddExpense = (raw: Omit<Transaction, 'id' | 'status'>) => {
-    const fresh: Transaction = {
-      ...raw,
-      id: `exp-${Date.now()}`,
-      status: 'Completed'
-    };
+    const fresh = addExpense(raw);
     const positiveAmt = Math.abs(raw.amount);
 
     setExpenses((p) => [fresh, ...p]);
-
-    // Recalculate associated budget limits immediately!
-    setBudgets((prevBudgets) => {
-      return prevBudgets.map((b) => {
-        if (b.category.toLowerCase() === raw.category.toLowerCase()) {
-          const updatedSpent = b.spent + positiveAmt;
-          const status = updatedSpent / b.limit >= 0.85 ? 'At Risk' : b.onTrackStatus;
-          const note = updatedSpent >= b.limit 
-            ? 'Limit exceeded! Minimize outgoings' 
-            : `Only $${Math.max(0, b.limit - updatedSpent).toFixed(2)} remaining`;
-          return {
-            ...b,
-            spent: updatedSpent,
-            onTrackStatus: status,
-            note
-          };
-        }
-        return b;
-      });
-    });
+    setBudgets((prevBudgets) => adjustBudgetsForExpense(prevBudgets, fresh));
 
     // Notify bot
     triggerBotWelcomeNotification(`Recorded card swipe: $${positiveAmt} spent at '${raw.source}'. Checked against active budget limit thresholds.`);
@@ -152,57 +132,25 @@ export default function App() {
   const handleDeleteExpense = (id: string) => {
     const target = expenses.find((e) => e.id === id);
     if (!target) return;
-    setExpenses((prev) => prev.filter((e) => e.id !== id));
 
-    // Deduct from budget too
-    setBudgets((prevBudgets) => {
-      return prevBudgets.map((b) => {
-        if (b.category.toLowerCase() === target.category.toLowerCase()) {
-          const updatedSpent = Math.max(0, b.spent - Math.abs(target.amount));
-          const status = updatedSpent / b.limit >= 0.85 ? 'At Risk' : 'On Track';
-          return {
-            ...b,
-            spent: updatedSpent,
-            onTrackStatus: status,
-            note: `$${(b.limit - updatedSpent).toFixed(2)} capacity left`
-          };
-        }
-        return b;
-      });
-    });
+    setExpenses((prev) => deleteExpense(id, prev));
+    setBudgets((prevBudgets) => rollbackExpenseFromBudgets(prevBudgets, target));
   };
 
   const handleAddBudget = (raw: Omit<Budget, 'id' | 'spent'>) => {
-    // Check if category already has previous logs
-    const previousSpent = expenses
-      .filter((e) => e.category.toLowerCase() === raw.category.toLowerCase())
-      .reduce((acc, e) => acc + Math.abs(e.amount), 0);
-
-    const fresh: Budget = {
-      ...raw,
-      id: `b-${raw.category.toLowerCase()}-${Date.now()}`,
-      spent: previousSpent,
-      onTrackStatus: previousSpent / raw.limit >= 0.85 ? 'At Risk' : 'On Track'
-    };
-
+    const fresh = createBudget(raw, expenses);
     setBudgets((prev) => [...prev, fresh]);
 
     triggerBotWelcomeNotification(`Established a new capping ceiling for '${raw.name}'. Monthly limit of $${raw.limit.toLocaleString()} registered.`);
   };
 
   const handleDeleteBudget = (id: string) => {
-    setBudgets((prev) => prev.filter((b) => b.id !== id));
+    setBudgets((prev) => deleteBudget(id, prev));
   };
 
   // Co-Pilot Chat triggers
   const handleSendMessage = (text: string) => {
-    const userMsg: ChatMessage = {
-      id: `msg-user-${Date.now()}`,
-      sender: 'user',
-      text,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    };
-
+    const userMsg = createUserMessage(text);
     setChatMessages((prev) => [...prev, userMsg]);
 
     // Intelligent context solver simulating real-life co-pilot logic
@@ -228,26 +176,14 @@ export default function App() {
         responseText = `Your current Net Worth is $${absoluteNetWorth.toLocaleString('en-US', { minimumFractionDigits: 2 })}. Your investment assets (Roth IRA & Brokerage) are experiencing a solid +8.1% timeline gain. Keep investing $500 monthly to reach $100K soon!`;
       }
 
-      const botMsg: ChatMessage = {
-        id: `msg-ai-${Date.now()}`,
-        sender: 'ai',
-        text: responseText,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-
+      const botMsg = createBotMessage(responseText);
       setChatMessages((prev) => [...prev, botMsg]);
     }, 850);
   };
 
   const triggerBotWelcomeNotification = (text: string) => {
     setTimeout(() => {
-      const botMsg: ChatMessage = {
-        id: `msg-ai-${Date.now()}`,
-        sender: 'ai',
-        text,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      setChatMessages((prev) => [...prev, botMsg]);
+      setChatMessages((prev) => [...prev, createBotMessage(text)]);
     }, 500);
   };
 
@@ -266,6 +202,12 @@ export default function App() {
   const totalAssetsValue = 12450 + 42500 + 21700;
   const totalLiabilitiesValue = 1400 + 1310;
   const absoluteNetWorth = totalAssetsValue - totalLiabilitiesValue;
+
+  if (!currentUser) {
+    return (
+      <AuthScreen onLogin={handleLogin} />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#f7f1de] flex flex-col md:flex-row antialiased">

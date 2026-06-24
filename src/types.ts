@@ -8,6 +8,12 @@ export interface Transaction {
   status: 'Completed' | 'Pending';
 }
 
+export interface User{
+  id: string;
+  username: string;
+  email: string;
+}
+
 export interface Budget {
   id: string;
   name: string;
