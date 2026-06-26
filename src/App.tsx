@@ -76,7 +76,7 @@ export default function App() {
     loadInitialData();
   }, []);
 
-  useEffect(() => {
+useEffect(() => {
     if (!currentUser) {
       return;
     }
